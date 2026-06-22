@@ -16,14 +16,18 @@ export default function Login() {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setBusy(false);
     if (error) return setError(error.message);
-    navigate('/');
+    navigate('/dashboard');
   }
 
   return (
     <div className="auth-wrap">
-      <form className="card" onSubmit={handleSubmit}>
-        <h1>Sign in</h1>
-        <p className="muted">AI QA dashboard</p>
+      <form className="auth-card" onSubmit={handleSubmit}>
+        <Link className="brand" to="/">
+          <span className="pip" />
+          <span className="brand-text">AI QA</span>
+        </Link>
+        <h1>Welcome back</h1>
+        <p className="sub">Sign in to your dashboard</p>
         {error && <div className="alert">{error}</div>}
         <label>
           Email
@@ -38,10 +42,10 @@ export default function Login() {
             required
           />
         </label>
-        <button className="btn" disabled={busy}>
+        <button className="btn btn-primary" disabled={busy}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
-        <p className="muted">
+        <p className="auth-foot">
           No account? <Link to="/signup">Create one</Link>
         </p>
       </form>

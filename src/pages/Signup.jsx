@@ -30,14 +30,18 @@ export default function Signup() {
       setMessage('Account created. Check your email to confirm, then sign in.');
       return;
     }
-    navigate('/');
+    navigate('/dashboard');
   }
 
   return (
     <div className="auth-wrap">
-      <form className="card" onSubmit={handleSubmit}>
+      <form className="auth-card" onSubmit={handleSubmit}>
+        <Link className="brand" to="/">
+          <span className="pip" />
+          <span className="brand-text">AI QA</span>
+        </Link>
         <h1>Create account</h1>
-        <p className="muted">AI QA dashboard</p>
+        <p className="sub">Start testing in minutes</p>
         {error && <div className="alert">{error}</div>}
         {message && <div className="alert success">{message}</div>}
         <label>
@@ -58,10 +62,10 @@ export default function Signup() {
             required
           />
         </label>
-        <button className="btn" disabled={busy}>
+        <button className="btn btn-primary" disabled={busy}>
           {busy ? 'Creating…' : 'Create account'}
         </button>
-        <p className="muted">
+        <p className="auth-foot">
           Already have an account? <Link to="/login">Sign in</Link>
         </p>
       </form>
