@@ -42,6 +42,257 @@ function DocAttach({ files, onAdd, onRemove }) {
   );
 }
 
+// Authenticated fetch against the API, attaching the current Supabase JWT.
+async function api(path, options = {}) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) throw new Error('Session expired — sign in again.');
+  const res = await fetch(`${import.meta.env.VITE_API_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${session.access_token}`,
+      ...(options.headers || {}),
+    },
+  });
+  if (res.status === 204) return null;
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Request failed');
+  return json;
+}
+
+const emptyForm = () => ({ label: '', loginUrl: '', username: '', password: '', allowedDomains: '' });
+
+// Per-project login credentials the test agent authenticates with. The password
+// is write-only here — the server never sends it back, only `hasSecret`.
+function ProfilesSection({ projectId }) {
+  const [profiles, setProfiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState(emptyForm());
+  const [busy, setBusy] = useState(false);
+
+  // Reusable fetch, called after every mutation to refresh the list.
+  async function load() {
+    const { profiles } = await api(`/projects/${projectId}/profiles`);
+    setProfiles(profiles);
+  }
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const { profiles } = await api(`/projects/${projectId}/profiles`);
+        if (active) setProfiles(profiles);
+      } catch (err) {
+        if (active) setError(err.message);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [projectId]);
+
+  function startAdd() {
+    setEditingId(null);
+    setForm(emptyForm());
+    setOpen(true);
+  }
+  function startEdit(p) {
+    setEditingId(p.id);
+    setForm({
+      label: p.label,
+      loginUrl: p.login_url || '',
+      username: p.username,
+      password: '', // never prefilled — blank means "keep existing"
+      allowedDomains: (p.allowed_domains || []).join(', '),
+    });
+    setOpen(true);
+  }
+  function cancel() {
+    setOpen(false);
+    setEditingId(null);
+    setForm(emptyForm());
+  }
+  function set(patch) {
+    setForm((f) => ({ ...f, ...patch }));
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const body = {
+        label: form.label,
+        loginUrl: form.loginUrl,
+        username: form.username,
+        allowedDomains: form.allowedDomains,
+      };
+      // Only send a password when one was typed (required on create; on edit a
+      // blank field leaves the stored secret untouched).
+      if (form.password) body.password = form.password;
+
+      if (editingId) {
+        await api(`/projects/${projectId}/profiles/${editingId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        });
+      } else {
+        if (!form.password) throw new Error('Password is required.');
+        await api(`/projects/${projectId}/profiles`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+      }
+      cancel();
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id) {
+    if (!confirm('Delete this login profile?')) return;
+    setError('');
+    try {
+      await api(`/projects/${projectId}/profiles/${id}`, { method: 'DELETE' });
+      setProfiles((p) => p.filter((x) => x.id !== id));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <section className="profiles">
+      <div className="profiles-head">
+        <div>
+          <h2>Login <em>profiles</em></h2>
+          <p className="muted">
+            Credentials the agent uses to sign in before testing. Use a dedicated,
+            low-privilege test account — passwords are encrypted at rest.
+          </p>
+        </div>
+        {!open && (
+          <button className="btn btn-ghost btn-sm" onClick={startAdd}>
+            + Add profile
+          </button>
+        )}
+      </div>
+
+      {error && <div className="alert">{error}</div>}
+
+      {open && (
+        <form className="form-card profile-form" onSubmit={submit}>
+          <h3>{editingId ? 'Edit profile' : 'New profile'}</h3>
+          <label>
+            Label *
+            <input
+              value={form.label}
+              onChange={(e) => set({ label: e.target.value })}
+              placeholder="Standard user"
+              required
+            />
+          </label>
+          <label>
+            Login URL
+            <input
+              type="url"
+              value={form.loginUrl}
+              onChange={(e) => set({ loginUrl: e.target.value })}
+              placeholder="https://example.com/login"
+            />
+          </label>
+          <label>
+            Username / email *
+            <input
+              value={form.username}
+              onChange={(e) => set({ username: e.target.value })}
+              required
+            />
+          </label>
+          <label>
+            Password {editingId ? '(leave blank to keep)' : '*'}
+            <input
+              type="password"
+              value={form.password}
+              onChange={(e) => set({ password: e.target.value })}
+              placeholder={editingId ? '••••••••' : ''}
+              autoComplete="new-password"
+              required={!editingId}
+            />
+          </label>
+          <label>
+            Allowed domains (comma-separated)
+            <input
+              value={form.allowedDomains}
+              onChange={(e) => set({ allowedDomains: e.target.value })}
+              placeholder="example.com, app.example.com"
+            />
+          </label>
+          <div className="form-actions">
+            <button type="button" className="btn btn-ghost" onClick={cancel}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" disabled={busy}>
+              {busy ? 'Saving…' : editingId ? 'Save changes' : 'Add profile'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {loading ? (
+        <div className="muted profile-empty">Loading…</div>
+      ) : profiles.length === 0 ? (
+        !open && <div className="muted profile-empty">No login profiles yet.</div>
+      ) : (
+        <ul className="profile-list">
+          {profiles.map((p) => (
+            <li key={p.id} className="profile-row">
+              <div className="pr-main">
+                <div className="pr-top">
+                  <span className="pr-label">{p.label}</span>
+                  <span className={`status-badge st-${p.status}`}>{p.status}</span>
+                </div>
+                <div className="pr-meta">
+                  <span className="mono">{p.username}</span>
+                  {p.login_url && <span className="pr-url mono">{p.login_url}</span>}
+                </div>
+                {p.allowed_domains?.length > 0 && (
+                  <div className="pr-domains">
+                    {p.allowed_domains.map((d) => (
+                      <span key={d} className="pill">{d}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="pr-actions">
+                <button className="btn btn-ghost btn-sm" disabled title="Coming soon">
+                  Test login
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => startEdit(p)}>
+                  Edit
+                </button>
+                <button className="btn btn-ghost btn-sm danger" onClick={() => remove(p.id)}>
+                  Delete
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 export default function ProjectDetail() {
   const { id } = useParams();
   const { user, signOut } = useAuth();
@@ -304,6 +555,8 @@ export default function ProjectDetail() {
                   </>
                 )}
               </div>
+
+              <ProfilesSection projectId={id} />
             </>
           )}
         </div>

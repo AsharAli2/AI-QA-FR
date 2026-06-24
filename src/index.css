@@ -273,6 +273,33 @@ a.proj-card:hover .pc-open { color: var(--paprika); }
 .fi-x { background: transparent; border: none; color: var(--slate); cursor: pointer; font-size: 12px; padding: 2px 4px; }
 .fi-x:hover { color: var(--paprika); }
 
+/* ---------- Login profiles ---------- */
+.profiles { margin-top: 48px; padding-top: 40px; border-top: 1px solid var(--rule); }
+.profiles-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+.profiles-head h2 { font-family: var(--serif); font-weight: 400; font-size: 28px; letter-spacing: -0.018em; margin: 0 0 6px; }
+.profiles-head h2 em { font-style: italic; color: var(--paprika); }
+.profiles-head p { margin: 0; font-size: 13.5px; max-width: 520px; }
+.profile-form { margin-bottom: 20px; }
+.profile-form h3 { font-family: var(--serif); font-weight: 400; font-size: 22px; margin: 0 0 18px; }
+.profile-form .form-actions { gap: 10px; }
+.profile-empty { font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; padding: 8px 0; }
+
+.profile-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.profile-row { border: 1px solid var(--rule); border-radius: 6px; background: #fff; padding: 18px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.pr-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pr-top { display: flex; align-items: center; gap: 10px; }
+.pr-label { font-family: var(--serif); font-size: 20px; letter-spacing: -0.01em; }
+.pr-meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--slate); }
+.pr-url { color: var(--clay); word-break: break-all; }
+.pr-domains { display: flex; gap: 6px; flex-wrap: wrap; }
+.pr-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btn.danger:hover:not(:disabled) { border-color: var(--paprika); color: var(--paprika); }
+
+.status-badge { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 3px 8px; border-radius: 3px; border: 1px solid var(--rule); }
+.status-badge.st-untested { color: var(--slate); }
+.status-badge.st-valid { color: var(--moss); border-color: var(--moss); background: rgba(107,122,79,0.08); }
+.status-badge.st-invalid, .status-badge.st-error { color: var(--paprika); border-color: var(--paprika); background: rgba(196,72,39,0.07); }
+
 .pill { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 3px 8px; border-radius: 3px; border: 1px solid var(--rule); color: var(--slate); }
 
 /* Empty state */
