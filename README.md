@@ -1,16 +1,58 @@
-# React + Vite
+# AI QA App — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite web client for the AI-driven QA product. It's the UI for creating
+projects, uploading product docs, managing login profiles, discovering routes, and
+authoring/running natural-language test **flows** against the
+[backend](../AI-QA) and [PinchTab Server](../Pinchtab%20Server).
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **React 19** + **Vite** (HMR dev server on `:5173`)
+- **React Router 7** for routing
+- **Supabase JS** for auth (the same Supabase project the backend uses)
 
-## React Compiler
+## Structure
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```
+src/
+  main.jsx              # app entry + router
+  context/AuthContext.jsx        # Supabase session/user context
+  components/ProtectedRoute.jsx  # gates authenticated routes
+  lib/supabase.js       # Supabase client (anon key)
+  pages/
+    Landing.jsx         # marketing / entry
+    Signup.jsx, Login.jsx   # Supabase email auth
+    Dashboard.jsx       # the user's projects
+    CreateProject.jsx   # new project + doc upload
+    ProjectDetail.jsx   # a project: routes, login profiles, and the Flows panel
+                        #   (compose a flow, run it, saved flows + run history)
+```
 
-## Expanding the ESLint configuration
+Auth is handled client-side by Supabase; the resulting JWT is sent as
+`Authorization: Bearer <token>` on every backend call, and Postgres RLS scopes all
+data to the signed-in user.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Setup
+
+```bash
+npm install
+cp .env.example .env    # then fill in the values below
+```
+
+| Var | Description |
+|-----|-------------|
+| `VITE_SUPABASE_URL` | Supabase project URL |
+| `VITE_SUPABASE_ANON_KEY` | Supabase anon/public key (never the service_role key) |
+| `VITE_API_URL` | Backend QA API base, e.g. `http://localhost:4000` |
+
+## Run
+
+```bash
+npm run dev       # Vite dev server (http://localhost:5173)
+npm run build     # production build
+npm run preview   # preview the build
+npm run lint      # eslint
+```
+
+The backend (`AI-QA`, default `:4000`) must be running for project/flow features;
+running a flow additionally needs the **PinchTab Server** gateway up.

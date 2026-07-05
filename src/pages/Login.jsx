@@ -23,8 +23,10 @@ export default function Login() {
     <div className="auth-wrap">
       <form className="auth-card" onSubmit={handleSubmit}>
         <Link className="brand" to="/">
-          <span className="pip" />
-          <span className="brand-text">AI QA</span>
+          <span className="pip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M7 17 17 7M17 7H9M17 7v8" /></svg>
+          </span>
+          <span className="brand-text">Preflight</span>
         </Link>
         <h1>Welcome back</h1>
         <p className="sub">Sign in to your dashboard</p>

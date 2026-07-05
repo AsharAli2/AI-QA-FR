@@ -46,10 +46,15 @@ const Icon = {
       <path d="m20 6-11 11-5-5" />
     </svg>
   ),
+  launch: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M7 17 17 7M17 7H9M17 7v8" />
+    </svg>
+  ),
 };
 
 const FEATURES = [
-  { icon: Icon.pen, title: 'No test scripts to write', body: 'Describe what matters in plain English. AI QA writes the tests and keeps them up to date for you.' },
+  { icon: Icon.pen, title: 'No test scripts to write', body: 'Describe what matters in plain English. Preflight writes the tests and keeps them up to date for you.' },
   { icon: Icon.refresh, title: 'Tests that heal themselves', body: 'When your UI changes, your tests adapt. No more flaky suites or maintenance days.' },
   { icon: Icon.shield, title: 'Catches what slips through', body: 'When the product stops matching what you promised, you hear about it before your customers do.' },
   { icon: Icon.compass, title: 'Explores like a real user', body: 'An AI agent navigates your live app the way a customer would — across every screen and flow.' },
@@ -59,7 +64,7 @@ const FEATURES = [
 
 const STEPS = [
   { n: '01', title: 'Connect your product', body: 'Add your site and tell us what it should do — paste your docs or describe your features in plain language.' },
-  { n: '02', title: 'Let the agent work', body: 'AI QA explores your app, learns every flow, and turns your requirements into a living test suite — automatically.' },
+  { n: '02', title: 'Let the agent work', body: 'Preflight explores your app, learns every flow, and turns your requirements into a living test suite — automatically.' },
   { n: '03', title: 'Ship with confidence', body: 'Get alerted the moment something breaks. Fix it before it ever reaches a customer.' },
 ];
 
@@ -71,9 +76,9 @@ const STATS = [
 ];
 
 const FAQS = [
-  { q: 'Do I need to write any code or test scripts?', a: 'No. You describe what your product should do in plain English — AI QA turns that into tests and maintains them as your app changes.' },
+  { q: 'Do I need to write any code or test scripts?', a: 'No. You describe what your product should do in plain English — Preflight turns that into tests and maintains them as your app changes.' },
   { q: 'Will tests break every time we change the UI?', a: 'No. Tests are grounded in what a feature is meant to do, not in brittle selectors, so they adapt to redesigns and small UI changes on their own.' },
-  { q: 'What kind of apps does it work with?', a: 'Any web product with a live URL. Point AI QA at your site and it discovers the pages and flows for you.' },
+  { q: 'What kind of apps does it work with?', a: 'Any web product with a live URL. Point Preflight at your site and it discovers the pages and flows for you.' },
   { q: 'How fast can we get started?', a: 'Minutes. Create a project, add your URL and docs, and the agent maps your app and starts generating coverage right away.' },
 ];
 
@@ -85,13 +90,13 @@ export default function Landing() {
       <nav className="nav">
         <div className="wrap nav-inner">
           <Link className="brand" to="/">
-            <span className="pip" />
-            <span className="brand-text">AI QA</span>
+            <span className="pip">{Icon.launch}</span>
+            <span className="brand-text">Preflight</span>
           </Link>
           <div className="nav-links">
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
-            <a href="#why">Why AI QA</a>
+            <a href="#why">Why Preflight</a>
             <a href="#faq">FAQ</a>
           </div>
           <div className="nav-cta">
@@ -117,7 +122,7 @@ export default function Landing() {
         <div className="wrap hero-inner">
           <a className="badge" href="#features">
             <span className="badge-ic">{Icon.sparkle}</span>
-            Agentic AI QA for fast-moving teams
+            Agentic QA for fast-moving teams
             <span className="badge-arrow">→</span>
           </a>
 
@@ -126,7 +131,7 @@ export default function Landing() {
           </h1>
 
           <p className="hero-sub">
-            AI QA reads your product, explores it like a real user, and turns every feature
+            Preflight reads your product, explores it like a real user, and turns every feature
             into a test — so nothing broken slips into production. No test scripts, no QA
             backlog, no surprises on launch day.
           </p>
@@ -143,7 +148,7 @@ export default function Landing() {
           <div className="hero-mock">
             <div className="mock-bar">
               <span className="dot" /><span className="dot" /><span className="dot" />
-              <span className="mock-url">app.aiqa.dev/runs/latest</span>
+              <span className="mock-url">app.preflight.dev/runs/latest</span>
             </div>
             <div className="mock-body">
               <div className="mock-row">
@@ -232,7 +237,7 @@ export default function Landing() {
             <span className="eyebrow">How it works</span>
             <h2>Live coverage in <em>three steps</em>.</h2>
             <p className="section-blurb">
-              No setup project, no scripting sprint. You bring the product; AI QA does the rest.
+              No setup project, no scripting sprint. You bring the product; Preflight does the rest.
             </p>
           </div>
 
@@ -252,10 +257,10 @@ export default function Landing() {
       <section className="section" id="why">
         <div className="wrap">
           <div className="section-head">
-            <span className="eyebrow">Why AI QA</span>
+            <span className="eyebrow">Why Preflight</span>
             <h2>Manual QA tests what someone <em>remembered</em>.</h2>
             <p className="section-blurb">
-              Hand-written test suites rot the moment your product moves on. AI QA stays in
+              Hand-written test suites rot the moment your product moves on. Preflight stays in
               step with what you actually shipped.
             </p>
           </div>
@@ -272,7 +277,7 @@ export default function Landing() {
               </ul>
             </div>
             <div className="compare-col us">
-              <div className="compare-label">With AI QA</div>
+              <div className="compare-label">With Preflight</div>
               <h3>An AI agent that never forgets</h3>
               <ul>
                 <li>{Icon.check} Your product is the source of truth, not tribal memory</li>
@@ -291,7 +296,7 @@ export default function Landing() {
           <figure className="quote">
             <blockquote>
               &ldquo;We replaced days of manual regression testing with a report waiting for
-              us every morning. AI QA catches the things our team would only find in
+              us every morning. Preflight catches the things our team would only find in
               production.&rdquo;
             </blockquote>
             <figcaption>
@@ -332,7 +337,7 @@ export default function Landing() {
           <div className="cta-glow" aria-hidden="true" />
           <h2>Stop finding bugs in production.</h2>
           <p>
-            Spin up a project, point AI QA at your product, and let the agent guard every
+            Spin up a project, point Preflight at your product, and let the agent guard every
             release for you.
           </p>
           <div className="cta-actions">
@@ -350,20 +355,20 @@ export default function Landing() {
         <div className="wrap footer-inner">
           <div className="footer-brand">
             <span className="brand">
-              <span className="pip" />
-              <span className="brand-text">AI QA</span>
+              <span className="pip">{Icon.launch}</span>
+              <span className="brand-text">Preflight</span>
             </span>
             <p>Ship faster. Catch bugs before your customers do.</p>
           </div>
           <div className="footer-links">
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
-            <a href="#why">Why AI QA</a>
+            <a href="#why">Why Preflight</a>
             <a href="#faq">FAQ</a>
           </div>
         </div>
         <div className="wrap footer-bottom">
-          <span>© {new Date().getFullYear()} AI QA. All rights reserved.</span>
+          <span>© {new Date().getFullYear()} Preflight. All rights reserved.</span>
         </div>
       </footer>
     </div>
