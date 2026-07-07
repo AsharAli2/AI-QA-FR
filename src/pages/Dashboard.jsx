@@ -1,26 +1,14 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { useProjects } from '../lib/queries';
 
 export default function Dashboard() {
   const { user, signOut } = useAuth();
-  const [projects, setProjects] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    // RLS scopes this to the current user automatically.
-    supabase
-      .from('projects')
-      .select('id, name, base_url, created_at')
-      .order('created_at', { ascending: false })
-      .then(({ data, error }) => {
-        if (error) setError(error.message);
-        setProjects(data ?? []);
-        setLoading(false);
-      });
-  }, []);
+  // Cached — revisiting the dashboard renders instantly; creating a project
+  // invalidates this query (CreateProject) so the new card appears.
+  const { data, isLoading: loading, error: loadError } = useProjects();
+  const projects = data ?? [];
+  const error = loadError?.message || '';
 
   return (
     <>

@@ -1,74 +1,402 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
-import { useAuth } from '../context/AuthContext';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { api } from '../lib/api';
+import { keys, useFlows, useProfiles, useProject, useRuns } from '../lib/queries';
+import ProjectShell from '../components/ProjectShell';
+import { runStatusBadge } from '../lib/runStatus';
 
-// Shared document-attach block, shown under both testing modes. UI only for now —
-// the upload/ingest wiring lands when we build the per-project document endpoint.
-function DocAttach({ files, onAdd, onRemove }) {
+// ---------------------------------------------------------------------------
+// Shared bits
+// ---------------------------------------------------------------------------
+
+const fmtWhen = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
+const fmtDuration = (run) => {
+  if (!run?.started_at || !run?.finished_at) return '—';
+  const s = Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+};
+
+// Row action menu (Edit / Delete, etc.) shown behind a vertical-dot trigger.
+// Closes on outside click.
+function KebabMenu({ items }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
   return (
-    <div className="attach">
-      <div className="attach-head">
-        <span className="attach-title">Attach docs</span>
-        <span className="attach-note">Specs, flows, or notes to ground the tests — optional</span>
-      </div>
-
-      <label className="upload-zone">
-        <input
-          type="file"
-          multiple
-          accept=".pdf,.txt,.md,.csv,.json,application/pdf,text/plain"
-          onChange={(e) => onAdd(Array.from(e.target.files ?? []))}
-        />
-        <span className="uz-icon">＋</span>
-        <span className="uz-text">Click to add files</span>
-        <span className="uz-sub">PDF, TXT, MD, CSV, JSON · up to 20 MB each</span>
-      </label>
-
-      {files.length > 0 && (
-        <ul className="file-list">
-          {files.map((f, i) => (
-            <li key={i} className="file-item">
-              <span className="fi-name">{f.name}</span>
-              <span className="fi-size">{(f.size / 1024).toFixed(0)} KB</span>
-              <button type="button" className="fi-x" onClick={() => onRemove(i)} aria-label="Remove">
-                ✕
-              </button>
-            </li>
+    <div className="kebab" ref={ref}>
+      <button
+        type="button"
+        className="kebab-btn"
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Row actions"
+        aria-haspopup="true"
+        aria-expanded={open}
+      >
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="12" cy="5" r="1.7" />
+          <circle cx="12" cy="12" r="1.7" />
+          <circle cx="12" cy="19" r="1.7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="kebab-menu" role="menu">
+          {items.map((it, i) => (
+            <button
+              key={i}
+              type="button"
+              role="menuitem"
+              className={`kebab-item ${it.danger ? 'danger' : ''}`}
+              onClick={() => {
+                setOpen(false);
+                it.onClick();
+              }}
+            >
+              {it.label}
+            </button>
           ))}
-        </ul>
+        </div>
       )}
     </div>
   );
 }
 
-// Authenticated fetch against the API, attaching the current Supabase JWT.
-async function api(path, options = {}) {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session) throw new Error('Session expired — sign in again.');
-  const res = await fetch(`${import.meta.env.VITE_API_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-      ...(options.headers || {}),
-    },
-  });
-  if (res.status === 204) return null;
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error || 'Request failed');
-  return json;
+// Generic "are you sure" modal for destructive actions.
+function ConfirmModal({ title, message, confirmLabel = 'Delete', busy, onCancel, onConfirm }) {
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
+      <div className="modal modal-confirm">
+        <div className="modal-head">
+          <h2>{title}</h2>
+          <button type="button" className="modal-x" onClick={onCancel} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <p className="muted">{message}</p>
+        <div className="form-actions" style={{ gap: 10 }}>
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-danger" onClick={onConfirm} disabled={busy}>
+            {busy ? 'Deleting…' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
+
+// ---------------------------------------------------------------------------
+// Flows — table of saved flows + create/edit modal
+// ---------------------------------------------------------------------------
+
+// Create/edit a flow: name + plain-language instructions + optional login profile.
+function FlowModal({ projectId, profiles, flow, onClose, onSaved }) {
+  const [name, setName] = useState(flow?.name || '');
+  const [content, setContent] = useState(flow?.flow_content || '');
+  const [profileId, setProfileId] = useState(flow?.profile_id || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function save(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const body = { name, flowContent: content, profileId: profileId || null };
+      if (flow) {
+        await api(`/projects/${projectId}/flows/${flow.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      } else {
+        await api(`/projects/${projectId}/flows`, { method: 'POST', body: JSON.stringify({ ...body, runNow: false }) });
+      }
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <form className="modal" onSubmit={save}>
+        <div className="modal-head">
+          <h2>{flow ? 'Edit Test Flow' : 'Create Test Flow'}</h2>
+          <button type="button" className="modal-x" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+
+        {error && <div className="alert">{error}</div>}
+
+        <label>
+          Flow name
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Look up train schedule" />
+        </label>
+
+        <label>
+          Test instructions *
+          <textarea
+            rows={7}
+            required
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder={'Go to "Book" and find trains for May 12th from Washington DC to New York City. Ensure that the schedule loads correctly.'}
+          />
+        </label>
+
+        <label>
+          Login profile
+          <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+            <option value="">None — run logged out</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} ({p.username})
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="form-actions" style={{ gap: 10 }}>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" disabled={busy || !content.trim()}>
+            {busy ? 'Saving…' : flow ? 'Save Changes' : 'Create Flow'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function FlowsView({ project }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  // Cached reads (direct Supabase / API) — instant on revisits; mutations below
+  // invalidate exactly what they change.
+  const { data: flowsData, isLoading: flowsLoading } = useFlows(project.id);
+  const { data: runsData } = useRuns(project.id);
+  const { data: profilesData } = useProfiles(project.id);
+  const flows = flowsData ?? [];
+  const runs = runsData ?? [];
+  const profiles = profilesData ?? [];
+  const loading = flowsLoading;
+
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [modal, setModal] = useState(null); // null | { flow: null } (create) | { flow } (edit)
+  const [confirmDelete, setConfirmDelete] = useState(null); // flow pending delete confirmation
+  const [deleting, setDeleting] = useState(false);
+
+  // Latest run per flow (the runs list is newest-first).
+  const latestByFlow = {};
+  for (const r of runs) if (!latestByFlow[r.flow_id]) latestByFlow[r.flow_id] = r;
+
+  const q = search.trim().toLowerCase();
+  const visible = q
+    ? flows.filter((f) => (f.name || f.flow_content).toLowerCase().includes(q))
+    : flows;
+
+  async function confirmedDelete() {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    try {
+      await api(`/projects/${project.id}/flows/${confirmDelete.id}`, { method: 'DELETE' });
+      // The flow and (via cascade) its runs are gone — refresh both caches.
+      queryClient.invalidateQueries({ queryKey: keys.flows(project.id) });
+      queryClient.invalidateQueries({ queryKey: keys.runs(project.id) });
+      setConfirmDelete(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="view-head">
+        <div>
+          <h1>Flows</h1>
+          <p className="muted">
+            Create and manage your automated flows. Flows are the “tests” you create to run on{' '}
+            {project.base_url ? <span className="mono">{project.base_url}</span> : 'your site'}.
+          </p>
+        </div>
+        <button className="btn btn-primary" onClick={() => setModal({ flow: null })} disabled={!project.base_url}>
+          + Create Flow
+        </button>
+      </div>
+
+      {!project.base_url && <div className="alert">Set a base URL in Settings before running flows.</div>}
+      {error && <div className="alert">{error}</div>}
+
+      <input
+        className="search-input"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search test flows…"
+      />
+
+      {loading ? (
+        <p className="muted">Loading flows…</p>
+      ) : visible.length === 0 ? (
+        <div className="empty" style={{ padding: '48px 32px' }}>
+          <p>{flows.length === 0 ? 'No flows yet — create your first test flow.' : 'No flows match your search.'}</p>
+        </div>
+      ) : (
+        <div className="tbl-wrap">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Profile</th>
+                <th>Latest Status</th>
+                <th>Last Run</th>
+                <th className="tbl-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((f) => {
+                const latest = latestByFlow[f.id];
+                const profile = profiles.find((p) => p.id === f.profile_id);
+                return (
+                  <tr key={f.id}>
+                    <td className="tbl-name">{f.name || f.flow_content.split('\n')[0]}</td>
+                    <td>{profile ? <span className="pill">@{profile.label}</span> : <span className="muted">logged-out</span>}</td>
+                    <td>{runStatusBadge(latest)}</td>
+                    <td className="muted">{latest ? fmtWhen(latest.started_at) : 'Never'}</td>
+                    <td className="tbl-actions">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        disabled={!project.base_url}
+                        onClick={() => navigate(`/projects/${project.id}/runs/new?flow=${f.id}`)}
+                      >
+                        ▶ Run Flow
+                      </button>
+                      <KebabMenu
+                        items={[
+                          { label: 'Edit', onClick: () => setModal({ flow: f }) },
+                          { label: 'Delete', danger: true, onClick: () => setConfirmDelete(f) },
+                        ]}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {modal && (
+        <FlowModal
+          projectId={project.id}
+          profiles={profiles}
+          flow={modal.flow}
+          onClose={() => setModal(null)}
+          onSaved={() => {
+            setModal(null);
+            queryClient.invalidateQueries({ queryKey: keys.flows(project.id) });
+          }}
+        />
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          title="Delete flow?"
+          message={`Delete "${confirmDelete.name || 'this flow'}" and all its runs? This can't be undone.`}
+          busy={deleting}
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={confirmedDelete}
+        />
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Runs — every run in the project; a row opens the run detail page
+// ---------------------------------------------------------------------------
+
+function RunsView({ project }) {
+  const navigate = useNavigate();
+  // Same cached query the Flows tab uses for "latest status" — switching tabs
+  // does not refetch; finishing a run (RunDetail) invalidates it.
+  const { data, isLoading: loading, error: loadError } = useRuns(project.id);
+  const runs = data ?? [];
+  const error = loadError?.message || '';
+
+  return (
+    <>
+      <div className="view-head">
+        <div>
+          <h1>Runs</h1>
+          <p className="muted">Every flow execution, newest first. Open a run to see its steps and screenshots.</p>
+        </div>
+      </div>
+
+      {error && <div className="alert">{error}</div>}
+
+      {loading ? (
+        <p className="muted">Loading runs…</p>
+      ) : runs.length === 0 ? (
+        <div className="empty" style={{ padding: '48px 32px' }}>
+          <p>No runs yet — run a flow from the Flows tab.</p>
+        </div>
+      ) : (
+        <div className="tbl-wrap">
+          <table className="tbl tbl-click">
+            <thead>
+              <tr>
+                <th>Flow</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Duration</th>
+                <th>Model calls</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr key={r.id} onClick={() => navigate(`/projects/${project.id}/runs/${r.id}`)}>
+                  <td className="tbl-name">{r.flows?.name || r.flows?.flow_content?.split('\n')[0] || 'Flow'}</td>
+                  <td>{runStatusBadge(r)}</td>
+                  <td className="muted">{fmtWhen(r.started_at)}</td>
+                  <td className="muted">{fmtDuration(r)}</td>
+                  <td className="muted">{r.llm_calls ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Settings — base URL, route discovery, login profiles, documents
+// ---------------------------------------------------------------------------
 
 const emptyForm = () => ({ label: '', loginUrl: '', username: '', password: '', allowedDomains: '' });
 
 // Per-project login credentials the test agent authenticates with. The password
 // is write-only here — the server never sends it back, only `hasSecret`.
-function ProfilesSection({ projectId, onCount }) {
-  const [profiles, setProfiles] = useState([]);
-  const [loading, setLoading] = useState(true);
+function ProfilesSection({ projectId }) {
+  const queryClient = useQueryClient();
+  // Profiles stay behind the API (the table carries the encrypted password);
+  // the query just caches that API read. Mutations invalidate it.
+  const { data, isLoading: loading, error: loadError } = useProfiles(projectId);
+  const profiles = data ?? [];
   const [error, setError] = useState('');
 
   const [open, setOpen] = useState(false);
@@ -76,32 +404,7 @@ function ProfilesSection({ projectId, onCount }) {
   const [form, setForm] = useState(emptyForm());
   const [busy, setBusy] = useState(false);
 
-  // Reusable fetch, called after every mutation to refresh the list.
-  async function load() {
-    const { profiles } = await api(`/projects/${projectId}/profiles`);
-    setProfiles(profiles);
-  }
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const { profiles } = await api(`/projects/${projectId}/profiles`);
-        if (active) setProfiles(profiles);
-      } catch (err) {
-        if (active) setError(err.message);
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [projectId]);
-
-  useEffect(() => {
-    onCount?.(profiles.length);
-  }, [profiles, onCount]);
+  const refresh = () => queryClient.invalidateQueries({ queryKey: keys.profiles(projectId) });
 
   function startAdd() {
     setEditingId(null);
@@ -156,7 +459,7 @@ function ProfilesSection({ projectId, onCount }) {
         });
       }
       cancel();
-      await load();
+      refresh();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -169,7 +472,7 @@ function ProfilesSection({ projectId, onCount }) {
     setError('');
     try {
       await api(`/projects/${projectId}/profiles/${id}`, { method: 'DELETE' });
-      setProfiles((p) => p.filter((x) => x.id !== id));
+      refresh();
     } catch (err) {
       setError(err.message);
     }
@@ -192,7 +495,7 @@ function ProfilesSection({ projectId, onCount }) {
         )}
       </div>
 
-      {error && <div className="alert">{error}</div>}
+      {(error || loadError) && <div className="alert">{error || loadError.message}</div>}
 
       {open && (
         <form className="form-card profile-form" onSubmit={submit}>
@@ -279,9 +582,6 @@ function ProfilesSection({ projectId, onCount }) {
                 )}
               </div>
               <div className="pr-actions">
-                <button className="btn btn-ghost btn-sm" disabled title="Coming soon">
-                  Test login
-                </button>
                 <button className="btn btn-ghost btn-sm" onClick={() => startEdit(p)}>
                   Edit
                 </button>
@@ -297,494 +597,55 @@ function ProfilesSection({ projectId, onCount }) {
   );
 }
 
-// Shared typography so the highlight backdrop and the textarea wrap text identically.
-const editorBase = {
-  fontFamily: 'inherit',
-  fontSize: 14,
-  lineHeight: '1.6',
-  padding: 12,
-  border: '1px solid transparent',
-  borderRadius: 10,
-  boxSizing: 'border-box',
-  width: '100%',
-  minHeight: 140,
-  margin: 0,
-  whiteSpace: 'pre-wrap',
-  wordWrap: 'break-word',
-  overflowWrap: 'break-word',
-};
-const hl = {
-  wrap: { position: 'relative' },
-  backdrop: { ...editorBase, position: 'absolute', inset: 0, color: 'transparent', pointerEvents: 'none', overflow: 'auto', background: 'transparent', zIndex: 1 },
-  textarea: { ...editorBase, position: 'relative', zIndex: 2, background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,.14)', resize: 'vertical', outline: 'none', caretColor: 'currentColor', display: 'block' },
-  mark: { background: 'rgba(124,108,255,.32)', color: 'transparent', borderRadius: 4, padding: '0 1px' },
-  menu: { listStyle: 'none', margin: 0, padding: 4, position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 5, background: '#15151c', border: '1px solid rgba(255,255,255,.14)', borderRadius: 10, maxHeight: 220, overflow: 'auto', boxShadow: '0 10px 28px rgba(0,0,0,.45)' },
-  item: { display: 'flex', justifyContent: 'space-between', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' },
-  itemActive: { background: 'rgba(124,108,255,.18)' },
-  itemLabel: { fontWeight: 600 },
-  itemMeta: { opacity: 0.6, fontSize: 12 },
-  foot: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 12 },
-  chip: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 999, background: 'rgba(124,108,255,.18)', border: '1px solid rgba(124,108,255,.4)', fontSize: 13 },
-  chipX: { background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: 0 },
-};
-
-// Flow authoring with @-mention profile tagging. Type the flow in plain language;
-// type "@" to tag a login profile — the agent runs the flow inside that profile's
-// session. On Run we POST { flowContent, profileId? } to the backend.
-function FlowComposer({ projectId, hasBaseUrl, onSaved }) {
-  const [profiles, setProfiles] = useState([]);
-  const [text, setText] = useState('');
-  const [selected, setSelected] = useState(null); // tagged login profile, or null = logged-out
-  const [menu, setMenu] = useState({ open: false, query: '', at: -1, index: 0 });
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState('');
-  // The saved flow this composer is currently bound to, the snapshot it was saved
-  // with, and its run history (newest first). While the text/profile match the
-  // saved snapshot, "Run" re-runs the SAME flow (adds run #2, #3…); editing either
-  // means the next run creates a NEW flow.
-  const [flowId, setFlowId] = useState(null);
-  const [savedText, setSavedText] = useState('');
-  const [savedProfileId, setSavedProfileId] = useState(null);
-  const [runs, setRuns] = useState([]);
-  const taRef = useRef(null);
-  const backdropRef = useRef(null);
-
-  const profileId = selected?.id || null;
-  const willRerun = flowId != null && text === savedText && profileId === savedProfileId;
-
-  useEffect(() => {
-    let active = true;
-    api(`/projects/${projectId}/profiles`)
-      .then(({ profiles }) => active && setProfiles(profiles))
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, [projectId]);
-
-  const matches = menu.open
-    ? profiles.filter((p) => p.label.toLowerCase().includes(menu.query.toLowerCase())).slice(0, 6)
-    : [];
-
-  // Find an active "@query" right before the caret (query may contain spaces).
-  function detectMention(value, caret) {
-    const upto = value.slice(0, caret);
-    const at = upto.lastIndexOf('@');
-    if (at === -1) return { open: false, query: '', at: -1, index: 0 };
-    const before = at === 0 ? ' ' : upto[at - 1];
-    const between = upto.slice(at + 1);
-    if (!/\s/.test(before) || between.includes('\n')) return { open: false, query: '', at: -1, index: 0 };
-    return { open: true, query: between, at, index: 0 };
-  }
-
-  function onChange(e) {
-    setText(e.target.value);
-    setMenu(detectMention(e.target.value, e.target.selectionStart));
-  }
-
-  function pick(profile) {
-    const caret = taRef.current?.selectionStart ?? text.length;
-    const next = `${text.slice(0, menu.at)}@${profile.label} ${text.slice(caret)}`;
-    setText(next);
-    setSelected(profile);
-    setMenu({ open: false, query: '', at: -1, index: 0 });
-    requestAnimationFrame(() => taRef.current?.focus());
-  }
-
-  function onKeyDown(e) {
-    if (!menu.open || matches.length === 0) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setMenu((m) => ({ ...m, index: (m.index + 1) % matches.length }));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setMenu((m) => ({ ...m, index: (m.index - 1 + matches.length) % matches.length }));
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      pick(matches[menu.index] || matches[0]);
-    } else if (e.key === 'Escape') {
-      setMenu({ open: false, query: '', at: -1, index: 0 });
-    }
-  }
-
-  function clearTag() {
-    if (selected) setText((t) => t.split(`@${selected.label}`).join('').replace(/[ \t]{2,}/g, ' '));
-    setSelected(null);
-  }
-
-  async function run() {
-    setRunning(true);
-    setError('');
-    try {
-      if (willRerun) {
-        // Same flow, unchanged → re-run it: a new run row under the SAME flow.
-        const { run } = await api(`/projects/${projectId}/flows/${flowId}/run`, { method: 'POST' });
-        setRuns((r) => [run, ...r]);
-      } else {
-        // First run, or the text/profile changed → save a new flow and run it.
-        const body = { flowContent: text };
-        if (profileId) body.profileId = profileId;
-        const { flow, run } = await api(`/projects/${projectId}/flows`, {
-          method: 'POST',
-          body: JSON.stringify(body),
-        });
-        setFlowId(flow.id);
-        setSavedText(text);
-        setSavedProfileId(profileId);
-        setRuns([run]);
-        onSaved?.(); // a new flow now exists → refresh the saved-flows panel
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  // Render the tagged "@Label" highlighted behind the (transparent) textarea.
-  function highlighted() {
-    if (!selected) return text + '\n';
-    const token = `@${selected.label}`;
-    const parts = text.split(token);
-    const out = [];
-    parts.forEach((part, i) => {
-      out.push(<span key={`p${i}`}>{part}</span>);
-      if (i < parts.length - 1) out.push(<mark key={`m${i}`} style={hl.mark}>{token}</mark>);
-    });
-    out.push('\n');
-    return out;
-  }
-
+// Shared document-attach block. UI only for now — the upload/ingest wiring lands
+// when we build the per-project document endpoint.
+function DocAttach({ files, onAdd, onRemove }) {
   return (
-    <>
-      <div className="panel-head">
-        <h2>Write your flow</h2>
-        <p>
-          Describe the test in plain language. Type <b>@</b> to tag a login profile — the flow runs
-          inside that profile&apos;s session. No tag = logged-out.
-        </p>
+    <div className="attach">
+      <div className="attach-head">
+        <span className="attach-title">Attach docs</span>
+        <span className="attach-note">Specs, flows, or notes to ground the tests — optional</span>
       </div>
 
-      <div style={hl.wrap}>
-        <div ref={backdropRef} style={hl.backdrop} aria-hidden="true">
-          {highlighted()}
-        </div>
-        <textarea
-          ref={taRef}
-          style={hl.textarea}
-          rows={6}
-          placeholder={'e.g. Log in as @, go to /billing, and confirm the plan shows “Pro”.'}
-          value={text}
-          onChange={onChange}
-          onKeyDown={onKeyDown}
-          onScroll={(e) => {
-            if (backdropRef.current) backdropRef.current.scrollTop = e.target.scrollTop;
-          }}
+      <label className="upload-zone">
+        <input
+          type="file"
+          multiple
+          accept=".pdf,.txt,.md,.csv,.json,application/pdf,text/plain"
+          onChange={(e) => onAdd(Array.from(e.target.files ?? []))}
         />
-        {menu.open && matches.length > 0 && (
-          <ul style={hl.menu}>
-            {matches.map((p, i) => (
-              <li
-                key={p.id}
-                style={{ ...hl.item, ...(i === menu.index ? hl.itemActive : null) }}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  pick(p);
-                }}
-                onMouseEnter={() => setMenu((m) => ({ ...m, index: i }))}
-              >
-                <span style={hl.itemLabel}>{p.label}</span>
-                <span style={hl.itemMeta}>{p.username}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+        <span className="uz-icon">＋</span>
+        <span className="uz-text">Click to add files</span>
+        <span className="uz-sub">PDF, TXT, MD, CSV, JSON · up to 20 MB each</span>
+      </label>
 
-      <div style={hl.foot}>
-        {selected ? (
-          <span style={hl.chip}>
-            Runs as <b>@{selected.label}</b>
-            <button type="button" onClick={clearTag} style={hl.chipX} aria-label="Remove profile">
-              ✕
-            </button>
-          </span>
-        ) : (
-          <span className="muted" style={{ fontSize: 13 }}>
-            No profile tagged · logged-out flow
-          </span>
-        )}
-        <button
-          className="btn btn-primary"
-          onClick={run}
-          disabled={running || !text.trim() || !hasBaseUrl}
-          title={hasBaseUrl ? '' : 'Set a base URL first'}
-        >
-          {running ? 'Running…' : willRerun ? 'Run again' : 'Run flow'}
-        </button>
-      </div>
-
-      {flowId && !willRerun && text.trim() && (
-        <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-          Flow edited — the next run will save a new flow (its run history starts fresh).
-        </p>
-      )}
-
-      {error && <div className="alert">{error}</div>}
-
-      {runs.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <h3 style={{ fontSize: 14, margin: '0 0 8px' }}>Run history</h3>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-            {runs.map((r, i) => (
-              <li key={r.id} className="dc-result" style={{ padding: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <b style={{ fontSize: 13 }}>Run #{runs.length - i}</b>
-                  <span className={`status-badge st-${r.passed ? 'valid' : 'invalid'}`}>
-                    {r.status === 'error' ? 'error' : r.passed ? 'passed' : 'failed'}
-                  </span>
-                  {r.finished_at && (
-                    <span className="muted" style={{ fontSize: 12, marginLeft: 'auto' }}>
-                      {new Date(r.finished_at).toLocaleString()}
-                    </span>
-                  )}
-                </div>
-                {r.summary && <p style={{ margin: '8px 0 0' }}>{r.summary}</p>}
-                {r.llm_calls != null && (
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    {r.llm_calls} model calls
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </>
-  );
-}
-
-// A single run row, shared by the composer's live list and the saved-flows history.
-function RunRow({ run, number }) {
-  return (
-    <li className="dc-result" style={{ padding: 12, listStyle: 'none' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        {number != null && <b style={{ fontSize: 13 }}>Run #{number}</b>}
-        <span className={`status-badge st-${run.passed ? 'valid' : 'invalid'}`}>
-          {run.status === 'error' ? 'error' : run.passed ? 'passed' : 'failed'}
-        </span>
-        {(run.finished_at || run.started_at) && (
-          <span className="muted" style={{ fontSize: 12, marginLeft: 'auto' }}>
-            {new Date(run.finished_at || run.started_at).toLocaleString()}
-          </span>
-        )}
-      </div>
-      {run.summary && <p style={{ margin: '8px 0 0' }}>{run.summary}</p>}
-      {run.llm_calls != null && (
-        <span className="muted" style={{ fontSize: 12 }}>
-          {run.llm_calls} model calls
-        </span>
-      )}
-    </li>
-  );
-}
-
-// Persistent list of every flow saved for this project, with each flow's run
-// history (lazy-loaded on expand) and a Run button that adds a new run. Reloads
-// whenever `refreshKey` changes (the composer bumps it after saving a new flow).
-function SavedFlows({ projectId, hasBaseUrl, refreshKey }) {
-  const [flows, setFlows] = useState([]);
-  const [profiles, setProfiles] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [expanded, setExpanded] = useState(null); // flow id whose runs are shown
-  const [runsByFlow, setRunsByFlow] = useState({}); // flowId -> run[] (newest first)
-  const [busy, setBusy] = useState(null); // flow id currently re-running
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    Promise.all([
-      api(`/projects/${projectId}/flows`)
-        .then((r) => r.flows)
-        .catch(() => []),
-      api(`/projects/${projectId}/profiles`)
-        .then((r) => r.profiles)
-        .catch(() => []),
-    ]).then(([fl, pr]) => {
-      if (!active) return;
-      setFlows(fl || []);
-      setProfiles(pr || []);
-      setLoading(false);
-    });
-    return () => {
-      active = false;
-    };
-  }, [projectId, refreshKey]);
-
-  const labelFor = (pid) => profiles.find((p) => p.id === pid)?.label;
-
-  async function loadRuns(fid) {
-    try {
-      const { runs } = await api(`/projects/${projectId}/flows/${fid}/runs`);
-      setRunsByFlow((m) => ({ ...m, [fid]: runs || [] }));
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
-  async function toggle(fid) {
-    if (expanded === fid) {
-      setExpanded(null);
-      return;
-    }
-    setExpanded(fid);
-    if (!runsByFlow[fid]) await loadRuns(fid);
-  }
-
-  async function rerun(fid) {
-    setBusy(fid);
-    setError('');
-    try {
-      const { run } = await api(`/projects/${projectId}/flows/${fid}/run`, { method: 'POST' });
-      setRunsByFlow((m) => ({ ...m, [fid]: [run, ...(m[fid] || [])] }));
-      setExpanded(fid);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  if (loading) return <p className="muted" style={{ marginTop: 16, fontSize: 13 }}>Loading saved flows…</p>;
-  if (flows.length === 0)
-    return (
-      <p className="muted" style={{ marginTop: 16, fontSize: 13 }}>
-        No saved flows yet — run one above and it will appear here.
-      </p>
-    );
-
-  return (
-    <div style={{ marginTop: 24 }}>
-      <h3 style={{ fontSize: 15, margin: '0 0 10px' }}>Saved flows</h3>
-      {error && <div className="alert">{error}</div>}
-      <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 10 }}>
-        {flows.map((f) => {
-          const runs = runsByFlow[f.id] || [];
-          const open = expanded === f.id;
-          const title = f.name || f.flow_content.split('\n')[0];
-          return (
-            <li key={f.id} className="dc-result" style={{ padding: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <strong style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {title}
-                  </strong>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    {f.profile_id ? `@${labelFor(f.profile_id) || 'login profile'}` : 'logged-out'}
-                    {f.created_at ? ` · saved ${new Date(f.created_at).toLocaleDateString()}` : ''}
-                  </span>
-                </div>
-                <button
-                  className="btn btn-sm"
-                  onClick={() => toggle(f.id)}
-                  aria-expanded={open}
-                  title="Show run history"
-                >
-                  {open ? 'Hide runs' : 'Runs'}
-                </button>
-                <button
-                  className="btn btn-primary btn-sm"
-                  onClick={() => rerun(f.id)}
-                  disabled={busy === f.id || !hasBaseUrl}
-                  title={hasBaseUrl ? 'Run this flow again' : 'Set a base URL first'}
-                >
-                  {busy === f.id ? 'Running…' : 'Run'}
-                </button>
-              </div>
-
-              {open && (
-                <div style={{ marginTop: 12 }}>
-                  {runs.length === 0 ? (
-                    <p className="muted" style={{ fontSize: 13, margin: 0 }}>No runs yet.</p>
-                  ) : (
-                    <ul style={{ padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-                      {runs.map((r, i) => (
-                        <RunRow key={r.id} run={r} number={runs.length - i} />
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
+      {files.length > 0 && (
+        <ul className="file-list">
+          {files.map((f, i) => (
+            <li key={i} className="file-item">
+              <span className="fi-name">{f.name}</span>
+              <span className="fi-size">{(f.size / 1024).toFixed(0)} KB</span>
+              <button type="button" className="fi-x" onClick={() => onRemove(i)} aria-label="Remove">
+                ✕
+              </button>
             </li>
-          );
-        })}
-      </ul>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
 
-// The "Write your own flow" tab: the composer plus the persistent saved-flows
-// panel. A version counter links them — saving a new flow refreshes the panel.
-function FlowsTab({ projectId, hasBaseUrl }) {
-  const [version, setVersion] = useState(0);
-  return (
-    <>
-      <FlowComposer projectId={projectId} hasBaseUrl={hasBaseUrl} onSaved={() => setVersion((v) => v + 1)} />
-      <SavedFlows projectId={projectId} hasBaseUrl={hasBaseUrl} refreshKey={version} />
-    </>
-  );
-}
-
-export default function ProjectDetail() {
-  const { id } = useParams();
-  const { user, signOut } = useAuth();
-
-  const [project, setProject] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  // Top-level page section — each is one click away, nothing requires scrolling.
-  const [section, setSection] = useState('tests');
-  const [profileCount, setProfileCount] = useState(null);
-
-  // Within "Tests": 'custom' = user writes flows by hand · 'discover' = let the agent crawl + generate
-  const [mode, setMode] = useState('discover');
-
-  // --- AI discover (wired to POST /projects/:id/discover) ---
+function SettingsView({ project }) {
   const [docFiles, setDocFiles] = useState([]);
   const [discovery, setDiscovery] = useState({ busy: false, result: null, error: '' });
-
-  useEffect(() => {
-    // RLS scopes this to the owner; a non-owned id simply returns no row.
-    supabase
-      .from('projects')
-      .select('id, name, base_url, settings, created_at')
-      .eq('id', id)
-      .single()
-      .then(({ data, error }) => {
-        if (error) setError(error.message);
-        setProject(data ?? null);
-        setLoading(false);
-      });
-  }, [id]);
 
   // Kick off route discovery on the server. Blocks until the crawl finishes
   // (tens of seconds), so we hold a busy state on the button.
   async function discover() {
     setDiscovery({ busy: true, result: null, error: '' });
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      if (!session) throw new Error('Session expired — sign in again.');
-
-      const res = await fetch(`${import.meta.env.VITE_API_URL}/projects/${id}/discover`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Discovery failed');
+      const json = await api(`/projects/${project.id}/discover`, { method: 'POST' });
       setDiscovery({ busy: false, result: json, error: '' });
     } catch (err) {
       setDiscovery({ busy: false, result: null, error: err.message });
@@ -793,200 +654,105 @@ export default function ProjectDetail() {
 
   return (
     <>
-      <nav className="nav">
-        <div className="wrap nav-inner">
-          <Link className="brand" to="/dashboard">
-            <span className="pip">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M7 17 17 7M17 7H9M17 7v8" /></svg>
-            </span>
-            <span className="brand-text">Preflight</span>
-            <span className="brand-tag">Project</span>
-          </Link>
-          <div className="nav-cta">
-            <span className="app-user">{user?.email}</span>
-            <Link className="btn btn-ghost btn-sm" to="/dashboard">
-              Dashboard
-            </Link>
-            <button className="btn btn-ghost btn-sm" onClick={signOut}>
-              Sign out
-            </button>
+      <div className="view-head">
+        <div>
+          <h1>Settings</h1>
+          <p className="muted">
+            Site under test:{' '}
+            {project.base_url ? <span className="mono">{project.base_url}</span> : 'no base URL set'}
+          </p>
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginBottom: 24 }}>
+        <div className="dc-step" style={{ padding: 0 }}>
+          <div>
+            <strong>Route discovery</strong>
+            <p>Crawl {project.base_url || 'the site'} and save every page the agent finds.</p>
           </div>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={discover}
+            disabled={!project.base_url || discovery.busy}
+          >
+            {discovery.busy ? 'Crawling…' : 'Discover routes'}
+          </button>
         </div>
-      </nav>
+        {discovery.error && <div className="alert" style={{ marginTop: 16 }}>{discovery.error}</div>}
+        {discovery.result && (
+          <div style={{ marginTop: 16 }}>
+            <span className="pc-result">
+              {discovery.result.routes?.length ?? 0} found · {discovery.result.persisted ?? 0} saved
+            </span>
+            {discovery.result.routes?.length > 0 && (
+              <ul className="route-list" style={{ marginTop: 10 }}>
+                {discovery.result.routes.map((r, i) => (
+                  <li key={i} className="route-item">
+                    <span className="ri-path mono">{r.path}</span>
+                    {r.title && <span className="ri-title">{r.title}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
 
-      <main className="app-main">
-        <div className="wrap narrow">
-          {loading ? (
-            <div className="center muted">Loading…</div>
-          ) : !project ? (
-            <div className="empty">
-              <span className="em-mark">&ldquo;</span>
-              <p>{error || 'Project not found.'}</p>
-              <Link className="btn btn-primary" to="/dashboard">
-                Back to dashboard <span className="btn-arrow">→</span>
-              </Link>
-            </div>
-          ) : (
-            <>
-              <div className="crumb">
-                <Link to="/dashboard">Projects</Link>
-                <span className="crumb-sep">/</span>
-                <span className="crumb-here">{project.name}</span>
-              </div>
+      <div className="panel" style={{ marginBottom: 24 }}>
+        <ProfilesSection projectId={project.id} />
+      </div>
 
-              <h1 className="detail-title">
-                Tell Preflight <em>what to test</em>
-              </h1>
-              <p className="detail-sub">
-                {project.base_url ? (
-                  <>
-                    Testing <span className="mono">{project.base_url}</span>. Write the flows
-                    yourself, or let the agent discover them.
-                  </>
-                ) : (
-                  <>
-                    No base URL set for this project yet — add one to enable automatic discovery.
-                  </>
-                )}
-              </p>
-
-              {/* Section nav — every section is one click away, nothing lives below a scroll */}
-              <div className="section-tabs" role="tablist">
-                <button
-                  role="tab"
-                  aria-selected={section === 'tests'}
-                  className={`section-tab ${section === 'tests' ? 'active' : ''}`}
-                  onClick={() => setSection('tests')}
-                >
-                  Tests
-                </button>
-                <button
-                  role="tab"
-                  aria-selected={section === 'profiles'}
-                  className={`section-tab ${section === 'profiles' ? 'active' : ''}`}
-                  onClick={() => setSection('profiles')}
-                >
-                  Login profiles
-                  {profileCount != null && <span className="tab-count">{profileCount}</span>}
-                </button>
-                <button
-                  role="tab"
-                  aria-selected={section === 'docs'}
-                  className={`section-tab ${section === 'docs' ? 'active' : ''}`}
-                  onClick={() => setSection('docs')}
-                >
-                  Documents
-                  {docFiles.length > 0 && <span className="tab-count">{docFiles.length}</span>}
-                </button>
-              </div>
-
-              {section === 'tests' && (
-                <>
-                  <div className="segmented" role="tablist">
-                    <button
-                      role="tab"
-                      aria-selected={mode === 'discover'}
-                      className={`seg ${mode === 'discover' ? 'active' : ''}`}
-                      onClick={() => setMode('discover')}
-                    >
-                      Let AI discover
-                    </button>
-                    <button
-                      role="tab"
-                      aria-selected={mode === 'custom'}
-                      className={`seg ${mode === 'custom' ? 'active' : ''}`}
-                      onClick={() => setMode('custom')}
-                    >
-                      Write your own flow
-                    </button>
-                  </div>
-
-                  <div className="panel">
-                    {mode === 'custom' ? (
-                      <FlowsTab projectId={id} hasBaseUrl={!!project.base_url} />
-                    ) : (
-                      <>
-                        <div className="panel-head">
-                          <h2>Let AI discover</h2>
-                          <p>
-                            The agent crawls your site, maps its routes, and drafts test cases for each
-                            one — no manual scripting.
-                          </p>
-                        </div>
-
-                        <div className="discover-card">
-                          <div className="dc-step">
-                            <span className="dc-num">1</span>
-                            <div>
-                              <strong>Discover routes</strong>
-                              <p>Crawl {project.base_url || 'the site'} and save every page it finds.</p>
-                            </div>
-                            <button
-                              className="btn btn-primary btn-sm"
-                              onClick={discover}
-                              disabled={!project.base_url || discovery.busy}
-                              title={project.base_url ? 'Crawl the site' : 'Set a base URL first'}
-                            >
-                              {discovery.busy ? 'Crawling…' : 'Discover routes'}
-                            </button>
-                          </div>
-
-                          {discovery.result && (
-                            <div className="dc-result">
-                              <span className="pc-result">
-                                {discovery.result.routes?.length ?? 0} found ·{' '}
-                                {discovery.result.persisted ?? 0} saved
-                              </span>
-                              {discovery.result.routes?.length > 0 && (
-                                <ul className="route-list">
-                                  {discovery.result.routes.map((r, i) => (
-                                    <li key={i} className="route-item">
-                                      <span className="ri-path mono">{r.path}</span>
-                                      {r.title && <span className="ri-title">{r.title}</span>}
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          )}
-                          {discovery.error && <div className="alert">{discovery.error}</div>}
-
-                          <div className="dc-step muted-step">
-                            <span className="dc-num">2</span>
-                            <div>
-                              <strong>Generate test cases</strong>
-                              <p>Draft tests for each discovered route. Coming soon.</p>
-                            </div>
-                            <button className="btn btn-ghost btn-sm" disabled title="Coming soon">
-                              Generate
-                            </button>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </>
-              )}
-
-              {section === 'profiles' && (
-                <div className="panel">
-                  <ProfilesSection projectId={id} onCount={setProfileCount} />
-                </div>
-              )}
-
-              {section === 'docs' && (
-                <div className="panel">
-                  <DocAttach
-                    files={docFiles}
-                    onAdd={(fs) => setDocFiles((p) => [...p, ...fs])}
-                    onRemove={(i) => setDocFiles((p) => p.filter((_, idx) => idx !== i))}
-                  />
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </main>
+      <div className="panel">
+        <DocAttach
+          files={docFiles}
+          onAdd={(fs) => setDocFiles((p) => [...p, ...fs])}
+          onRemove={(i) => setDocFiles((p) => p.filter((_, idx) => idx !== i))}
+        />
+      </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Page — sidebar shell + the active view (?tab=runs|flows|settings)
+// ---------------------------------------------------------------------------
+
+export default function ProjectDetail() {
+  const { id } = useParams();
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') || 'flows';
+
+  // Cached and shared with RunDetail — navigating between them never refetches.
+  // RLS scopes the row to the owner; a non-owned id simply returns no row.
+  const { data, isLoading: loading, error: loadError } = useProject(id);
+  const project = data ?? null;
+  const error = loadError?.message || '';
+
+  if (loading) {
+    return (
+      <ProjectShell project={null} active={tab} onNav={(k) => setParams({ tab: k })}>
+        <div className="center muted">Loading…</div>
+      </ProjectShell>
+    );
+  }
+  if (!project) {
+    return (
+      <ProjectShell project={null} active={tab} onNav={(k) => setParams({ tab: k })}>
+        <div className="empty">
+          <p>{error || 'Project not found.'}</p>
+          <Link className="btn btn-primary" to="/dashboard">
+            Back to dashboard
+          </Link>
+        </div>
+      </ProjectShell>
+    );
+  }
+
+  return (
+    <ProjectShell project={project} active={tab} onNav={(k) => setParams({ tab: k })}>
+      {tab === 'runs' && <RunsView project={project} />}
+      {tab === 'settings' && <SettingsView project={project} />}
+      {tab !== 'runs' && tab !== 'settings' && <FlowsView project={project} />}
+    </ProjectShell>
   );
 }

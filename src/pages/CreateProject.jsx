@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
+import { keys } from '../lib/queries';
 
 export default function CreateProject() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // ----- project fields (projects schema) -----
   const [name, setName] = useState('');
@@ -44,6 +47,9 @@ export default function CreateProject() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Failed to create project');
+
+      // A new project exists — the cached dashboard list is now stale.
+      queryClient.invalidateQueries({ queryKey: keys.projects });
 
       // Drop the user straight into the new project so they can pick how to test.
       navigate(`/projects/${json.project.id}`);
