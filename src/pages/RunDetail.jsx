@@ -33,6 +33,12 @@ function actionsFromSteps(steps = []) {
 
 const prettyTool = (t) => (t || '').replace(/^browser_/, '').replace(/_/g, ' ');
 
+// 42000 → "42s", 114000 → "1m 54s"
+function fmtDuration(ms) {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
 function ToolChip({ tool, running }) {
   const state =
     tool.ok === true ? 'ok' : tool.ok === false ? 'fail' : running ? 'busy' : 'skip';
@@ -43,6 +49,79 @@ function ToolChip({ tool, running }) {
       {state === 'busy' && <span className="tc-spin" />}
       {prettyTool(tool.tool)}
     </span>
+  );
+}
+
+// ---- Run report (finished runs): collapsible issues + network timings ------
+
+function shortUrl(u = '') {
+  let s = u;
+  try {
+    const { pathname, search } = new URL(u);
+    s = pathname + search;
+  } catch { /* keep raw */ }
+  return s.length > 90 ? `${s.slice(0, 90)}…` : s;
+}
+
+const isFailed = (r) => r.status === 0 || r.status >= 400;
+
+function Collapse({ title, count, children }) {
+  if (!count) return null;
+  return (
+    <details className="rpt-group">
+      <summary>
+        <span className="rpt-chev" aria-hidden="true" />
+        {title}
+        <span className="rpt-count mono">{count}</span>
+      </summary>
+      <div className="rpt-body">{children}</div>
+    </details>
+  );
+}
+
+function RequestRow({ r }) {
+  return (
+    <div className="req-row" title={r.url}>
+      <span className={`req-status mono ${isFailed(r) ? 'bad' : ''}`}>
+        {r.status === 0 ? 'ERR' : (r.status ?? '—')}
+      </span>
+      <span className="req-method mono">{r.method || 'GET'}</span>
+      <span className="req-url mono">{shortUrl(r.url)}</span>
+      <span className="req-ms mono">{r.durationMs != null ? `${r.durationMs} ms` : ''}</span>
+    </div>
+  );
+}
+
+// Not a time-series (the report stores durations, not timestamps): a bar per
+// request, slowest first, so the expensive calls surface immediately.
+function NetworkBars({ requests }) {
+  const rows = [...requests].sort((a, b) => (b.durationMs || 0) - (a.durationMs || 0));
+  const max = Math.max(...rows.map((r) => r.durationMs || 0), 1);
+  return (
+    <div className="net-bars">
+      {rows.map((r, i) => {
+        const tone = isFailed(r) ? 'bad' : (r.durationMs || 0) > 3000 ? 'slow' : '';
+        return (
+          <div
+            className="net-row"
+            key={i}
+            title={`${r.method || 'GET'} ${r.url} — ${r.durationMs ?? '?'} ms${isFailed(r) ? ` (status ${r.status})` : ''}`}
+          >
+            <span className="net-url mono">{shortUrl(r.url)}</span>
+            <span className="net-track">
+              <span
+                className={`net-bar ${tone}`}
+                style={{ width: `${Math.max(((r.durationMs || 0) / max) * 100, 2)}%` }}
+              />
+            </span>
+            <span className="net-ms mono">
+              {isFailed(r) && <b className="bad">{r.status === 0 ? 'ERR' : r.status} </b>}
+              {r.durationMs != null ? `${r.durationMs} ms` : '—'}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -176,6 +255,13 @@ export default function RunDetail() {
   const shownShot = shownTurn != null ? shots[shownTurn] : null;
 
   const issues = run?.result?.issues;
+  const requests = run?.result?.network?.requests ?? [];
+  const issueTotal = issues
+    ? (issues.failedRequests?.length || 0) +
+      (issues.slowRequests?.length || 0) +
+      (issues.jsErrors?.length || 0) +
+      (issues.security?.length || 0)
+    : 0;
   const issueChips = issues
     ? [
         issues.failedRequests?.length && `${issues.failedRequests.length} failed request${issues.failedRequests.length > 1 ? 's' : ''}`,
@@ -197,6 +283,8 @@ export default function RunDetail() {
       </div>
       <p className="muted run-when">
         {run?.started_at ? new Date(run.started_at).toLocaleString() : 'starting…'}
+        {run?.started_at && run?.finished_at &&
+          ` · ${fmtDuration(new Date(run.finished_at) - new Date(run.started_at))}`}
         {run?.llm_calls != null && ` · ${run.llm_calls} model calls`}
       </p>
 
@@ -296,6 +384,41 @@ export default function RunDetail() {
           )}
         </section>
       </div>
+
+      {run && run.status !== 'running' && run.result && (
+        <section className="run-report">
+          <h2>Report</h2>
+          {issueTotal === 0 && (
+            <p className="rpt-clean">✓ No issues detected — no failed requests, JS errors or security findings.</p>
+          )}
+          <Collapse title="Failed requests" count={issues?.failedRequests?.length}>
+            {(issues?.failedRequests ?? []).map((r, i) => (
+              <RequestRow key={i} r={r} />
+            ))}
+          </Collapse>
+          <Collapse title="Slow requests (over 3s)" count={issues?.slowRequests?.length}>
+            {(issues?.slowRequests ?? []).map((r, i) => (
+              <RequestRow key={i} r={r} />
+            ))}
+          </Collapse>
+          <Collapse title="JS errors" count={issues?.jsErrors?.length}>
+            {(issues?.jsErrors ?? []).map((e, i) => (
+              <div key={i} className="err-row mono">{e}</div>
+            ))}
+          </Collapse>
+          <Collapse title="Security findings" count={issues?.security?.length}>
+            {(issues?.security ?? []).map((s, i) => (
+              <div key={i} className="sec-row">
+                <span className="pill">{s.type}</span>
+                <span className="sec-detail mono">{s.detail}</span>
+              </div>
+            ))}
+          </Collapse>
+          <Collapse title="Network — response times" count={requests.length}>
+            <NetworkBars requests={requests} />
+          </Collapse>
+        </section>
+      )}
     </ProjectShell>
   );
 }
