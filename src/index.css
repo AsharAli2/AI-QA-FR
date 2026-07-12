@@ -568,6 +568,19 @@ a.proj-card:hover .pc-open { color: var(--accent-ink); }
 .status-badge.st-invalid, .status-badge.st-error { color: var(--danger); border-color: var(--danger); background: rgba(239,68,68,0.12); }
 
 .pill { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 3px 8px; border-radius: 3px; border: 1px solid var(--rule); color: var(--slate); }
+.pill-mode { color: var(--accent-ink); border-color: rgba(94,106,210,0.4); background: var(--accent-soft); }
+
+/* Login-method chooser (credentials vs manual) on the profile form. */
+.mode-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 22px; }
+.mode-opt { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 14px 16px 14px 40px; border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--surface); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.mode-opt:hover { border-color: var(--border-strong); }
+.mode-opt.active { border-color: var(--accent); background: var(--accent-soft); }
+.mode-opt input { position: absolute; left: 14px; top: 16px; accent-color: var(--accent); }
+.mode-title { font-weight: 600; color: var(--ink); font-size: 14px; }
+.mode-desc { font-size: 12px; color: var(--slate); line-height: 1.4; }
+@media (max-width: 560px) { .mode-toggle { grid-template-columns: 1fr; } }
+
+.pr-login-hint { font-size: 12.5px; color: var(--accent-ink); background: var(--accent-soft); border: 1px solid rgba(94,106,210,0.3); border-radius: var(--radius-sm); padding: 8px 12px; line-height: 1.45; }
 
 .empty { border: 1px dashed var(--border-strong); border-radius: var(--radius-md); padding: 72px 32px; text-align: center; display: flex; flex-direction: column; gap: 18px; align-items: center; }
 .empty .em-mark { font-family: var(--serif); font-weight: 600; font-size: 40px; color: var(--paprika); }

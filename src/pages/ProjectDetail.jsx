@@ -159,7 +159,7 @@ function FlowModal({ projectId, profiles, flow, onClose, onSaved }) {
             <option value="">None — run logged out</option>
             {profiles.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.label} ({p.username})
+                {p.label}{p.username ? ` (${p.username})` : ' (manual login)'}
               </option>
             ))}
           </select>
@@ -387,7 +387,7 @@ function RunsView({ project }) {
 // Settings — base URL, route discovery, login profiles, documents
 // ---------------------------------------------------------------------------
 
-const emptyForm = () => ({ label: '', loginUrl: '', username: '', password: '', allowedDomains: '' });
+const emptyForm = () => ({ loginMode: 'credentials', label: '', loginUrl: '', username: '', password: '', allowedDomains: '' });
 
 // Per-project login credentials the test agent authenticates with. The password
 // is write-only here — the server never sends it back, only `hasSecret`.
@@ -403,6 +403,11 @@ function ProfilesSection({ projectId }) {
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm());
   const [busy, setBusy] = useState(false);
+  // Manual (Model A) login handoff: `loginBusy` = profile whose viewer link is
+  // being fetched; `pendingLogin` = profile whose viewer tab is open, awaiting
+  // the user to come back and confirm they finished signing in.
+  const [loginBusy, setLoginBusy] = useState(null);
+  const [pendingLogin, setPendingLogin] = useState(null);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: keys.profiles(projectId) });
 
@@ -414,9 +419,10 @@ function ProfilesSection({ projectId }) {
   function startEdit(p) {
     setEditingId(p.id);
     setForm({
+      loginMode: p.login_mode || 'credentials',
       label: p.label,
       loginUrl: p.login_url || '',
-      username: p.username,
+      username: p.username || '',
       password: '', // never prefilled — blank means "keep existing"
       allowedDomains: (p.allowed_domains || []).join(', '),
     });
@@ -436,15 +442,22 @@ function ProfilesSection({ projectId }) {
     setError('');
     setBusy(true);
     try {
+      const manual = form.loginMode === 'manual';
       const body = {
         label: form.label,
         loginUrl: form.loginUrl,
-        username: form.username,
         allowedDomains: form.allowedDomains,
       };
-      // Only send a password when one was typed (required on create; on edit a
-      // blank field leaves the stored secret untouched).
-      if (form.password) body.password = form.password;
+      if (manual) {
+        // Model A: the user signs in themselves — no username/password stored.
+        body.loginMode = 'manual';
+        if (!form.loginUrl) throw new Error('Login URL is required for manual login.');
+      } else {
+        body.username = form.username;
+        // Only send a password when one was typed (required on create; on edit a
+        // blank field leaves the stored secret untouched).
+        if (form.password) body.password = form.password;
+      }
 
       if (editingId) {
         await api(`/projects/${projectId}/profiles/${editingId}`, {
@@ -452,7 +465,7 @@ function ProfilesSection({ projectId }) {
           body: JSON.stringify(body),
         });
       } else {
-        if (!form.password) throw new Error('Password is required.');
+        if (!manual && !form.password) throw new Error('Password is required.');
         await api(`/projects/${projectId}/profiles`, {
           method: 'POST',
           body: JSON.stringify(body),
@@ -464,6 +477,35 @@ function ProfilesSection({ projectId }) {
       setError(err.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Model A step 1: open the user's login viewer in a NEW TAB. They sign in there
+  // themselves; their password never touches us. We then wait for them to return.
+  async function beginLogin(p) {
+    setError('');
+    setLoginBusy(p.id);
+    try {
+      const { viewerUrl } = await api(`/projects/${projectId}/profiles/${p.id}/login`, { method: 'POST' });
+      window.open(viewerUrl, '_blank', 'noopener,noreferrer');
+      setPendingLogin(p.id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoginBusy(null);
+    }
+  }
+
+  // Model A step 2: the user came back and confirmed. Close the login window and
+  // mark the profile valid (its persistent session is now authenticated).
+  async function confirmLogin(id) {
+    setError('');
+    try {
+      await api(`/projects/${projectId}/profiles/${id}/login/done`, { method: 'POST' });
+      setPendingLogin(null);
+      refresh();
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -484,8 +526,9 @@ function ProfilesSection({ projectId }) {
         <div>
           <h2>Login <em>profiles</em></h2>
           <p className="muted">
-            Credentials the agent uses to sign in before testing. Use a dedicated,
-            low-privilege test account — passwords are encrypted at rest.
+            How the agent gets into a signed-in account before testing. Either the
+            agent types stored credentials (encrypted at rest), or you sign in
+            yourself once and the session is reused — your password never touches us.
           </p>
         </div>
         {!open && (
@@ -500,6 +543,33 @@ function ProfilesSection({ projectId }) {
       {open && (
         <form className="form-card profile-form" onSubmit={submit}>
           <h3>{editingId ? 'Edit profile' : 'New profile'}</h3>
+
+          {/* Mode is fixed once created (the two modes store different fields). */}
+          {!editingId && (
+            <div className="mode-toggle" role="radiogroup" aria-label="Login method">
+              <label className={form.loginMode === 'credentials' ? 'mode-opt active' : 'mode-opt'}>
+                <input
+                  type="radio"
+                  name="loginMode"
+                  checked={form.loginMode === 'credentials'}
+                  onChange={() => set({ loginMode: 'credentials' })}
+                />
+                <span className="mode-title">Agent signs in</span>
+                <span className="mode-desc">Store a test account's username &amp; password (encrypted).</span>
+              </label>
+              <label className={form.loginMode === 'manual' ? 'mode-opt active' : 'mode-opt'}>
+                <input
+                  type="radio"
+                  name="loginMode"
+                  checked={form.loginMode === 'manual'}
+                  onChange={() => set({ loginMode: 'manual' })}
+                />
+                <span className="mode-title">I'll sign in myself</span>
+                <span className="mode-desc">Log in once in a secure window — works with SSO, MFA, OAuth. No password stored.</span>
+              </label>
+            </div>
+          )}
+
           <label>
             Label *
             <input
@@ -510,33 +580,38 @@ function ProfilesSection({ projectId }) {
             />
           </label>
           <label>
-            Login URL
+            Login URL {form.loginMode === 'manual' ? '*' : ''}
             <input
               type="url"
               value={form.loginUrl}
               onChange={(e) => set({ loginUrl: e.target.value })}
               placeholder="https://example.com/login"
+              required={form.loginMode === 'manual'}
             />
           </label>
-          <label>
-            Username / email *
-            <input
-              value={form.username}
-              onChange={(e) => set({ username: e.target.value })}
-              required
-            />
-          </label>
-          <label>
-            Password {editingId ? '(leave blank to keep)' : '*'}
-            <input
-              type="password"
-              value={form.password}
-              onChange={(e) => set({ password: e.target.value })}
-              placeholder={editingId ? '••••••••' : ''}
-              autoComplete="new-password"
-              required={!editingId}
-            />
-          </label>
+          {form.loginMode !== 'manual' && (
+            <>
+              <label>
+                Username / email *
+                <input
+                  value={form.username}
+                  onChange={(e) => set({ username: e.target.value })}
+                  required
+                />
+              </label>
+              <label>
+                Password {editingId ? '(leave blank to keep)' : '*'}
+                <input
+                  type="password"
+                  value={form.password}
+                  onChange={(e) => set({ password: e.target.value })}
+                  placeholder={editingId ? '••••••••' : ''}
+                  autoComplete="new-password"
+                  required={!editingId}
+                />
+              </label>
+            </>
+          )}
           <label>
             Allowed domains (comma-separated)
             <input
@@ -570,7 +645,11 @@ function ProfilesSection({ projectId }) {
                   <span className={`status-badge st-${p.status}`}>{p.status}</span>
                 </div>
                 <div className="pr-meta">
-                  <span className="mono">{p.username}</span>
+                  {p.login_mode === 'manual' ? (
+                    <span className="pill pill-mode">You sign in</span>
+                  ) : (
+                    <span className="mono">{p.username}</span>
+                  )}
                   {p.login_url && <span className="pr-url mono">{p.login_url}</span>}
                 </div>
                 {p.allowed_domains?.length > 0 && (
@@ -580,8 +659,28 @@ function ProfilesSection({ projectId }) {
                     ))}
                   </div>
                 )}
+                {pendingLogin === p.id && (
+                  <div className="pr-login-hint">
+                    A sign-in window opened in a new tab. Finish logging in there, then come back and
+                    click <strong>I've finished</strong>.
+                  </div>
+                )}
               </div>
               <div className="pr-actions">
+                {p.login_mode === 'manual' &&
+                  (pendingLogin === p.id ? (
+                    <button className="btn btn-primary btn-sm" onClick={() => confirmLogin(p.id)}>
+                      I've finished
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => beginLogin(p)}
+                      disabled={loginBusy === p.id}
+                    >
+                      {loginBusy === p.id ? 'Opening…' : p.status === 'valid' ? 'Re-authenticate' : 'Log in'}
+                    </button>
+                  ))}
                 <button className="btn btn-ghost btn-sm" onClick={() => startEdit(p)}>
                   Edit
                 </button>
